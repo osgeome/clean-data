@@ -7,6 +7,7 @@ from qgis.core import (QgsTask, QgsApplication, QgsMessageLog, Qgis,
                       QgsVectorLayer, QgsField, QgsFeature, QgsFeatureRequest)
 from PyQt5.QtCore import QVariant
 import requests
+import re
 from .settings_manager import SettingsManager
 
 class TranslationService:
@@ -21,28 +22,37 @@ class GoogleTranslateService(TranslationService):
         # Get API key from settings
         api_key = SettingsManager.get_google_api_key()
         if not api_key:
-            raise ValueError("Google Cloud API key not configured")
+            raise ValueError("Google Cloud API key not configured. Please add your API key in Settings.")
             
         self.api_key = api_key
         self.base_url = "https://translation.googleapis.com/language/translate/v2"
-        self._verify_api_key()
         
     def _verify_api_key(self):
         """Verify the API key works"""
         try:
             # Try a simple translation to verify the key
-            test_data = {
+            params = {
                 'q': 'test',
                 'target': 'ar',
                 'key': self.api_key
             }
             
-            response = requests.post(self.base_url, json=test_data, timeout=5)
+            response = requests.get(self.base_url, params=params, timeout=5)
+            if response.status_code == 403:
+                raise ValueError(
+                    "Invalid or restricted Google API key. Please check:\n"
+                    "1. The API key is correct\n"
+                    "2. Cloud Translation API is enabled for your project\n"
+                    "3. The API key has permission to use Cloud Translation API\n"
+                    "4. You have billing enabled for your Google Cloud project"
+                )
+            
             response.raise_for_status()
             
             result = response.json()
             if 'error' in result:
-                raise ValueError(f"API key verification failed: {result['error']['message']}")
+                error_msg = result['error'].get('message', 'Unknown error')
+                raise ValueError(f"API key verification failed: {error_msg}")
                 
             QgsMessageLog.logMessage(
                 "Google Translate API key verified successfully",
@@ -51,29 +61,96 @@ class GoogleTranslateService(TranslationService):
             )
             
         except requests.exceptions.RequestException as e:
+            if '403' in str(e):
+                raise ValueError(
+                    "Invalid or restricted Google API key. Please check:\n"
+                    "1. The API key is correct\n"
+                    "2. Cloud Translation API is enabled for your project\n"
+                    "3. The API key has permission to use Cloud Translation API\n"
+                    "4. You have billing enabled for your Google Cloud project"
+                )
             raise ValueError(f"Failed to verify Google Translate API key: {str(e)}")
             
-    def translate(self, texts, target_lang, batch_mode=True, batch_size=128, 
+    def translate(self, texts, target_lang, batch_mode=True, batch_size=50, 
                  source_lang='auto', **kwargs):
         """Translate texts using Google Cloud Translation API"""
         if not texts:
             return []
             
-        # Use a reasonable batch size
-        batch_size = min(batch_size, 128)  # Google's limit is 128
+        # First verify API key to fail fast
+        try:
+            self._verify_api_key()
+        except ValueError as e:
+            QgsMessageLog.logMessage(
+                f"Google Translate API verification failed: {str(e)}",
+                'Clean Data',
+                Qgis.Critical
+            )
+            # Return empty strings for all texts since we can't translate
+            return [""] * len(texts)
+            
+        # Clean and validate input texts
+        texts = [str(t).strip() for t in texts]
+        texts = [t for t in texts if t]  # Remove empty texts
+        
+        if not texts:
+            return []
+            
+        # Use a reasonable batch size (Google's limit is 128)
+        batch_size = min(batch_size, 100)  # Use 100 as safe limit
         
         if not batch_mode or len(texts) == 1:
             return [self._translate_single(text, target_lang, source_lang)
                    for text in texts]
         
         # Process in batches
-        translations = []
+        all_translations = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            batch_translations = self._translate_batch(batch, target_lang, source_lang)
-            translations.extend(batch_translations)
             
-        return translations
+            try:
+                batch_translations = self._translate_batch(batch, target_lang, source_lang)
+                if batch_translations:
+                    all_translations.extend(batch_translations)
+                else:
+                    # If batch fails, try one by one
+                    QgsMessageLog.logMessage(
+                        f"Batch translation failed, falling back to single mode for {len(batch)} texts",
+                        'Clean Data',
+                        Qgis.Warning
+                    )
+                    for text in batch:
+                        trans = self._translate_single(text, target_lang, source_lang)
+                        all_translations.append(trans if trans else "")
+                        
+            except Exception as e:
+                if '403' in str(e):
+                    QgsMessageLog.logMessage(
+                        "Google API authentication failed. Please check your API key and permissions.",
+                        'Clean Data',
+                        Qgis.Critical
+                    )
+                    # Fill remaining translations with empty strings
+                    remaining = len(texts) - len(all_translations)
+                    all_translations.extend([""] * remaining)
+                    break  # Stop processing on auth error
+                else:
+                    QgsMessageLog.logMessage(
+                        f"Error in batch {i//batch_size + 1}: {str(e)}",
+                        'Clean Data',
+                        Qgis.Warning
+                    )
+                    # Add empty strings for failed batch
+                    all_translations.extend([""] * len(batch))
+                
+            # Log progress
+            QgsMessageLog.logMessage(
+                f"Translated {len(all_translations)}/{len(texts)} texts",
+                'Clean Data',
+                Qgis.Info
+            )
+            
+        return all_translations
         
     def _translate_single(self, text, target_lang, source_lang='auto'):
         """Translate a single text"""
@@ -81,27 +158,204 @@ class GoogleTranslateService(TranslationService):
             return ""
             
         try:
-            data = {
+            params = {
                 'q': text,
                 'target': target_lang,
                 'key': self.api_key
             }
             
-            if source_lang != 'auto':
-                data['source'] = source_lang
+            if source_lang.lower() != 'auto':
+                params['source'] = source_lang
                 
-            response = requests.post(self.base_url, json=data, timeout=10)
+            response = requests.get(self.base_url, params=params, timeout=30)
             response.raise_for_status()
             
             result = response.json()
-            if 'error' in result:
-                raise ValueError(f"Translation error: {result['error']['message']}")
+            if 'data' in result and 'translations' in result['data']:
+                translation = result['data']['translations'][0].get('translatedText', '')
+                return translation.strip()
+            else:
+                QgsMessageLog.logMessage(
+                    f"Invalid response format: {result}",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                return ""
                 
-            translations = result.get('data', {}).get('translations', [])
-            if not translations:
-                raise ValueError("No translation received")
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Translation failed: {str(e)}",
+                'Clean Data',
+                Qgis.Critical
+            )
+            return ""
+            
+    def _translate_batch(self, texts, target_lang, source_lang='auto'):
+        """Translate a batch of texts"""
+        if not texts:
+            return []
+            
+        try:
+            # Build query parameters
+            params = {
+                'q': texts,  # Google API accepts list of strings
+                'target': target_lang,
+                'key': self.api_key
+            }
+            
+            if source_lang.lower() != 'auto':
+                params['source'] = source_lang
                 
-            return translations[0]['translatedText']
+            response = requests.get(self.base_url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            if 'data' in result and 'translations' in result['data']:
+                return [t.get('translatedText', '').strip() for t in result['data']['translations']]
+            else:
+                QgsMessageLog.logMessage(
+                    f"Invalid response format: {result}",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                return [""] * len(texts)
+                
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Batch translation failed: {str(e)}",
+                'Clean Data',
+                Qgis.Critical
+            )
+            return [""] * len(texts)
+
+class OllamaService(TranslationService):
+    """Ollama API implementation"""
+    
+    def __init__(self):
+        """Initialize Ollama service"""
+        # Get base URL from settings
+        base_url = SettingsManager.get_ollama_url()
+        if not base_url:
+            raise ValueError("Ollama URL not configured. Please set it in Settings.")
+            
+        self.base_url = base_url.rstrip('/')
+        self.url = f"{self.base_url}/api/generate"
+        
+        # Get default model from settings
+        self.default_model = SettingsManager.get_ollama_model()
+        
+        self._check_connection()
+        
+    def _check_connection(self):
+        """Check connection to Ollama server and get available models"""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            response.raise_for_status()
+            
+            models = [model['name'] for model in response.json()['models']]
+            QgsMessageLog.logMessage(
+                f"Connected to Ollama server at {self.base_url}. Available models: {', '.join(models)}",
+                'Clean Data',
+                Qgis.Info
+            )
+            
+            # Verify our default model is available
+            if self.default_model not in models:
+                QgsMessageLog.logMessage(
+                    f"Warning: Default model '{self.default_model}' not found. Available models: {', '.join(models)}",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                # Use first available model as fallback
+                self.default_model = models[0]
+                
+            QgsMessageLog.logMessage(
+                f"Using Ollama model: {self.default_model}",
+                'Clean Data',
+                Qgis.Info
+            )
+            
+        except Exception as e:
+            raise ValueError(f"Failed to connect to Ollama server at {self.base_url}: {str(e)}")
+            
+    def translate(self, texts, target_lang, model=None, batch_mode=True, batch_size=5,
+                 prompt_template=None, source_lang='auto', instructions=''):
+        """Translate texts using Ollama API"""
+        if not texts:
+            return []
+            
+        # Use default model if none specified
+        model = model or self.default_model
+        
+        # Convert all texts to strings and clean them
+        texts = [str(text).strip() if text is not None else "" for text in texts]
+        texts = [text for text in texts if text]  # Remove empty texts
+        
+        if not texts:
+            return []
+            
+        # Use default prompt if none provided
+        if not prompt_template:
+            prompt_template = (
+                "Translate the following text to {target_lang}. "
+                "Only return the translation, no explanations:\n\n{text}"
+            )
+            
+        # Process in batches or single mode
+        if not batch_mode or len(texts) == 1:
+            return [self._translate_single(text, target_lang, model, prompt_template)
+                   for text in texts]
+                   
+        # Process in batches
+        translations = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            batch_translations = self._translate_batch(batch, target_lang, model, prompt_template)
+            if batch_translations:
+                translations.extend(batch_translations)
+            else:
+                # If batch fails, try one by one
+                QgsMessageLog.logMessage(
+                    f"Batch translation failed, falling back to single mode for {len(batch)} texts",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                for text in batch:
+                    trans = self._translate_single(text, target_lang, model, prompt_template)
+                    translations.append(trans if trans else "")
+                    
+        return translations
+        
+    def _translate_single(self, text, target_lang, model, prompt_template):
+        """Translate a single text"""
+        if not text:
+            return ""
+            
+        try:
+            # Format prompt with text
+            prompt = prompt_template.format(
+                target_lang=target_lang,
+                text=text
+            )
+            
+            data = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False
+            }
+            
+            response = requests.post(self.url, json=data, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            if not result or 'response' not in result:
+                raise ValueError("Invalid response format")
+                
+            translation = result['response'].strip()
+            if not translation:
+                raise ValueError("Empty translation received")
+                
+            return translation
             
         except Exception as e:
             QgsMessageLog.logMessage(
@@ -111,36 +365,80 @@ class GoogleTranslateService(TranslationService):
             )
             return ""
             
-    def _translate_batch(self, batch, target_lang, source_lang='auto'):
+    def _translate_batch(self, texts, target_lang, model, prompt_template):
         """Translate a batch of texts"""
-        if not batch:
+        if not texts:
             return []
             
         try:
+            # Join texts with numbering for better context
+            numbered_texts = "\n".join(f"{i+1}. {text}" for i, text in enumerate(texts))
+            
+            # Format prompt with all texts
+            prompt = prompt_template.format(
+                target_lang=target_lang,
+                text=numbered_texts
+            )
+            
             data = {
-                'q': batch,
-                'target': target_lang,
-                'key': self.api_key
+                "model": model,
+                "prompt": prompt,
+                "stream": False
             }
             
-            if source_lang != 'auto':
-                data['source'] = source_lang
-                
-            response = requests.post(self.base_url, json=data, timeout=30)
+            response = requests.post(self.url, json=data, timeout=30)
             response.raise_for_status()
             
             result = response.json()
-            if 'error' in result:
-                raise ValueError(f"Translation error: {result['error']['message']}")
+            if not result or 'response' not in result:
+                raise ValueError("Invalid response format")
                 
-            translations = result.get('data', {}).get('translations', [])
-            if not translations:
-                raise ValueError("No translations received")
+            # Split response by numbers and clean up
+            translation = result['response'].strip()
+            translations = []
+            
+            # Try to split by numbered lines first
+            lines = translation.split('\n')
+            current_translation = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Check if line starts with a number
+                if line[0].isdigit() and '. ' in line:
+                    if current_translation:
+                        translations.append(' '.join(current_translation))
+                        current_translation = []
+                    # Remove the number prefix
+                    text = line.split('. ', 1)[1]
+                    current_translation.append(text)
+                else:
+                    current_translation.append(line)
+                    
+            # Add the last translation
+            if current_translation:
+                translations.append(' '.join(current_translation))
                 
-            if len(translations) != len(batch):
-                raise ValueError(f"Got {len(translations)} translations, expected {len(batch)}")
+            # If we didn't get the right number of translations, try simple line splitting
+            if len(translations) != len(texts):
+                translations = [line.strip() for line in translation.split('\n') if line.strip()]
                 
-            return [t['translatedText'] for t in translations]
+            # Ensure we have the right number of translations
+            if len(translations) != len(texts):
+                QgsMessageLog.logMessage(
+                    f"Got {len(translations)} translations, expected {len(texts)}",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                # Pad with empty strings if needed
+                while len(translations) < len(texts):
+                    translations.append("")
+                # Truncate if we got too many
+                translations = translations[:len(texts)]
+                
+            return translations
             
         except Exception as e:
             QgsMessageLog.logMessage(
@@ -148,201 +446,7 @@ class GoogleTranslateService(TranslationService):
                 'Clean Data',
                 Qgis.Critical
             )
-            # Return empty strings for failed batch
-            return [""] * len(batch)
-
-class OllamaService(TranslationService):
-    """Ollama API implementation"""
-    def __init__(self):
-        base_url = SettingsManager.get_ollama_url()
-        if not base_url:
-            raise ValueError("Ollama URL not configured")
-        self.url = base_url.rstrip('/') + '/api/generate'
-        self._verify_connection()
-        
-    def _verify_connection(self):
-        """Verify Ollama server connectivity"""
-        try:
-            # Check basic server connectivity
-            base_url = self.url.replace('/api/generate', '')
-            response = requests.get(base_url, timeout=5)
-            if response.status_code != 200:
-                raise ValueError(f"Ollama server returned status {response.status_code}")
-                
-            # Check model availability
-            models_url = base_url + '/api/tags'
-            models_response = requests.get(models_url, timeout=5)
-            if models_response.status_code != 200:
-                raise ValueError("Failed to get available models")
-                
-            models = models_response.json().get('models', [])
-            if not models:
-                raise ValueError("No models available on Ollama server")
-                
-            QgsMessageLog.logMessage(
-                f"Connected to Ollama server. Available models: {', '.join(m['name'] for m in models)}",
-                'Clean Data',
-                Qgis.Info
-            )
-            
-        except requests.exceptions.ConnectionError:
-            raise ValueError(f"Cannot connect to Ollama server at {self.url}. Is the server running?")
-        except requests.exceptions.Timeout:
-            raise ValueError("Connection to Ollama server timed out")
-        except Exception as e:
-            raise ValueError(f"Failed to verify Ollama server: {str(e)}")
-
-    def translate(self, texts, target_lang, model='aya', batch_mode=True, batch_size=5, 
-                 prompt_template=None, max_retries=2, **kwargs):
-        """Translate texts using Ollama API"""
-        if not texts:
-            return []
-            
-        # Get default prompt templates if none provided
-        if not prompt_template:
-            if batch_mode and len(texts) > 1:
-                prompt_template = SettingsManager.DEFAULT_BATCH_TRANSLATION_PROMPT
-            else:
-                prompt_template = SettingsManager.DEFAULT_SINGLE_TRANSLATION_PROMPT
-        
-        # Use smaller batch size for safety
-        batch_size = min(batch_size, 5)
-        
-        if not batch_mode:
-            return [self._translate_single(text, target_lang, model, prompt_template, max_retries)
-                   for text in texts]
-        
-        # Process in batches
-        translations = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            batch_translations = self._translate_batch(
-                batch, target_lang, model, prompt_template, max_retries
-            )
-            if batch_translations:
-                translations.extend(batch_translations)
-            else:
-                # If batch fails, try one by one
-                QgsMessageLog.logMessage(
-                    "Batch translation failed, falling back to single mode",
-                    'Clean Data',
-                    Qgis.Warning
-                )
-                for text in batch:
-                    trans = self._translate_single(
-                        text, target_lang, model, prompt_template, max_retries
-                    )
-                    translations.append(trans if trans else "")
-                    
-        return translations
-
-    def _translate_single(self, text, target_lang, model, prompt_template, max_retries):
-        """Translate a single text"""
-        if not text:
-            return ""
-            
-        for attempt in range(max_retries + 1):
-            try:
-                prompt = prompt_template.format(
-                    target_lang=target_lang,
-                    text=text
-                )
-                
-                data = {
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False
-                }
-                
-                response = requests.post(self.url, json=data, timeout=30)
-                response.raise_for_status()
-                
-                result = response.json()
-                if not result or 'response' not in result:
-                    raise ValueError("Invalid response format")
-                    
-                translation = result['response'].strip()
-                if not translation:
-                    raise ValueError("Empty translation received")
-                    
-                return translation
-                
-            except Exception as e:
-                if attempt < max_retries:
-                    QgsMessageLog.logMessage(
-                        f"Retry {attempt + 1}/{max_retries}: {str(e)}",
-                        'Clean Data',
-                        Qgis.Warning
-                    )
-                    continue
-                QgsMessageLog.logMessage(
-                    f"Translation failed: {str(e)}",
-                    'Clean Data',
-                    Qgis.Critical
-                )
-                return ""
-
-    def _translate_batch(self, batch, target_lang, model, prompt_template, max_retries):
-        """Translate a batch of texts"""
-        if not batch:
-            return []
-            
-        for attempt in range(max_retries + 1):
-            try:
-                # Create indexed texts
-                texts_str = "\n".join(f"{i+1}. {text}" for i, text in enumerate(batch))
-                
-                # Format prompt
-                prompt = prompt_template.format(
-                    batch_size=len(batch),
-                    target_lang=target_lang,
-                    texts=texts_str
-                )
-                
-                data = {
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False
-                }
-                
-                response = requests.post(self.url, json=data, timeout=30)
-                response.raise_for_status()
-                
-                result = response.json()
-                if not result or 'response' not in result:
-                    raise ValueError("Invalid response format")
-                    
-                # Parse translations
-                translations = []
-                response_text = result['response'].strip()
-                lines = [line.strip() for line in response_text.split('\n') if line.strip()]
-                
-                for line in lines:
-                    # Remove numbering and other markers
-                    cleaned = line.lstrip('0123456789.)-][ *•-').strip()
-                    if cleaned:
-                        translations.append(cleaned)
-                
-                # Validate translation count
-                if len(translations) != len(batch):
-                    raise ValueError(f"Got {len(translations)} translations, expected {len(batch)}")
-                    
-                return translations
-                
-            except Exception as e:
-                if attempt < max_retries:
-                    QgsMessageLog.logMessage(
-                        f"Retry {attempt + 1}/{max_retries}: {str(e)}",
-                        'Clean Data',
-                        Qgis.Warning
-                    )
-                    continue
-                QgsMessageLog.logMessage(
-                    f"Batch translation failed: {str(e)}",
-                    'Clean Data',
-                    Qgis.Critical
-                )
-                return None
+            return [""] * len(texts)
 
 class TranslationTask(QgsTask):
     """Task for handling translations in background"""
@@ -350,7 +454,7 @@ class TranslationTask(QgsTask):
     def __init__(self, description, layer, source_field, target_field, service, 
                  target_lang='ar', model=None, batch_mode=True, batch_size=10,
                  prompt_template=None, source_lang='auto', instructions='', 
-                 callback=None):
+                 callback=None, skip_values=None):
         super().__init__(description, QgsTask.CanCancel)
         
         # Store parameters
@@ -367,12 +471,34 @@ class TranslationTask(QgsTask):
         self.instructions = instructions
         self.callback = callback
         
+        # Parse skip values
+        self.skip_values = set()
+        if skip_values:
+            # Split by comma and strip whitespace
+            self.skip_values = {v.strip() for v in skip_values.split(',')}
+        
         # Initialize state
         self.features_to_translate = []
         self.total_features = 0
         self.translated_count = 0
         self.exception = None
         self.failed_features = []
+        self.skipped_features = []
+        
+    def _should_skip_text(self, text, existing_translation=None):
+        """Check if text should be skipped"""
+        if text is None or str(text).strip() == "":
+            return True
+            
+        # Skip if text matches any of the skip values
+        if str(text).strip() in self.skip_values:
+            return True
+            
+        # Skip if already translated
+        if existing_translation and str(existing_translation).strip():
+            return True
+            
+        return False
         
     def run(self):
         """Run the translation task"""
@@ -381,7 +507,7 @@ class TranslationTask(QgsTask):
             all_features = []
             feature_map = {}
             
-            # Get source field index first
+            # Get field indices
             source_idx = self.layer.fields().indexOf(self.source_field)
             if source_idx < 0:
                 raise ValueError(f"Source field '{self.source_field}' not found in layer")
@@ -389,10 +515,11 @@ class TranslationTask(QgsTask):
             # Create target field if it doesn't exist
             target_idx = self.layer.fields().indexOf(self.target_field)
             if target_idx < 0:
-                self.layer.startEditing()
+                if not self.layer.startEditing():
+                    raise ValueError("Failed to start editing layer")
                 self.layer.addAttribute(QgsField(self.target_field, QVariant.String))
                 if not self.layer.commitChanges():
-                    raise Exception("Failed to add target field to layer")
+                    raise ValueError("Failed to add target field to layer")
                 target_idx = self.layer.fields().indexOf(self.target_field)
             
             # Store initial feature count for verification
@@ -406,20 +533,22 @@ class TranslationTask(QgsTask):
             # Safely get all features first
             request = QgsFeatureRequest()
             request.setFlags(QgsFeatureRequest.NoGeometry)  # We don't need geometry
-            request.setSubsetOfAttributes([source_idx])  # Only get the source field
+            request.setSubsetOfAttributes([source_idx, target_idx])  # Get both source and target fields
             
             for feature in self.layer.getFeatures(request):
                 fid = feature.id()
-                text = feature[source_idx]
+                source_text = feature[source_idx]
+                existing_translation = feature[target_idx]
                 
-                # Skip empty or whitespace-only texts
-                if not text or not str(text).strip():
+                # Skip if conditions are met
+                if self._should_skip_text(source_text, existing_translation):
+                    self.skipped_features.append(fid)
                     continue
                     
                 # Store feature data
                 feature_data = {
                     'id': fid,
-                    'text': str(text).strip(),
+                    'text': str(source_text).strip(),
                     'translated': False
                 }
                 
@@ -429,7 +558,7 @@ class TranslationTask(QgsTask):
             self.total_features = len(feature_map)
             if self.total_features == 0:
                 QgsMessageLog.logMessage(
-                    "No features to translate",
+                    f"No features to translate (skipped {len(self.skipped_features)} features)",
                     'Clean Data',
                     Qgis.Warning
                 )
@@ -447,7 +576,7 @@ class TranslationTask(QgsTask):
             
             # Start editing once for all changes
             if not self.layer.startEditing():
-                raise Exception("Failed to start editing layer")
+                raise ValueError("Failed to start editing layer")
             
             try:
                 # Process features in chunks
@@ -512,6 +641,18 @@ class TranslationTask(QgsTask):
                             )
                             # Add failed features to list
                             self.failed_features.extend(batch_ids)
+                            # Don't continue retrying if it's an auth error
+                            if '403' in str(e):
+                                QgsMessageLog.logMessage(
+                                    "Authentication error - stopping translation",
+                                    'Clean Data',
+                                    Qgis.Critical
+                                )
+                                self.layer.rollBack()
+                                self.exception = ValueError(
+                                    "Google API authentication failed. Please check your API key and permissions."
+                                )
+                                return False
                             continue
                         
                         QgsMessageLog.logMessage(
@@ -519,7 +660,7 @@ class TranslationTask(QgsTask):
                             'Clean Data',
                             Qgis.Info
                         )
-                    
+                
                 # Verify results
                 untranslated = [
                     fid for fid, data in feature_map.items() 
@@ -535,12 +676,12 @@ class TranslationTask(QgsTask):
                 
                 # Commit changes
                 if not self.layer.commitChanges():
-                    raise Exception("Failed to commit changes to layer")
+                    raise ValueError("Failed to commit changes to layer")
                 
                 # Final verification
                 final_count = self.layer.featureCount()
                 if final_count != initial_count:
-                    raise Exception(
+                    raise ValueError(
                         f"Layer corruption detected! Initial count: {initial_count}, "
                         f"Final count: {final_count}"
                     )
@@ -559,9 +700,13 @@ class TranslationTask(QgsTask):
                 Qgis.Critical
             )
             return False
-
+            
     def finished(self, result):
         """Called when the task is complete"""
+        # Always call the callback one last time to ensure UI is updated
+        if self.callback:
+            self.callback(self)
+            
         if result:
             if self.failed_features:
                 QgsMessageLog.logMessage(
@@ -636,6 +781,8 @@ class TranslationTask(QgsTask):
                 'Clean Data',
                 Qgis.Warning
             )
+            # Add failed features to list
+            self.failed_features.extend([feat.id() for feat in features])
             return False
 
 class TranslationManager:
@@ -656,7 +803,7 @@ class TranslationManager:
             
     def translate_column(self, layer, source_field, target_field, prompt_template=None, 
                         service_name='Ollama', model=None, source_lang='auto', target_lang='ar', 
-                        instructions='', batch_mode=True, batch_size=10, progress_callback=None):
+                        instructions='', batch_mode=True, batch_size=10, progress_callback=None, skip_values=None):
         """Translate a column in a vector layer using background task
         
         Args:
@@ -672,6 +819,7 @@ class TranslationManager:
             batch_mode (bool, optional): Whether to use batch mode. Defaults to True.
             batch_size (int, optional): Number of texts to translate at once in batch mode. Defaults to 10.
             progress_callback (callable, optional): Callback function for progress updates. Defaults to None.
+            skip_values (str, optional): Comma-separated values to skip translation for. Defaults to None.
         """
         try:
             # Get translation service
@@ -708,7 +856,8 @@ class TranslationManager:
                 prompt_template=prompt_template,
                 source_lang=source_lang,
                 instructions=instructions,
-                callback=progress_callback
+                callback=progress_callback,
+                skip_values=skip_values
             )
             
             QgsApplication.taskManager().addTask(self.task)

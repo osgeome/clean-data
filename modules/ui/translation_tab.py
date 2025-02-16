@@ -260,39 +260,40 @@ class TranslationTab(QWidget):
             
     def handle_translate(self):
         """Handle translate button click"""
-        layer = self.layer_combo.currentData()
-        source_field = self.field_combo.currentData()
-        target_field = self.get_target_field()
-        service_name = self.service.currentText()
-        source_lang = self.source_lang.currentText().lower()
-        target_lang = self.target_lang.currentText().lower()
-        
-        if not layer or not source_field or not target_field:
-            QMessageBox.warning(
-                self,
-                "Missing Information",
-                "Please select a layer, source field, and target field."
-            )
-            return
+        try:
+            layer = self.layer_combo.currentData()
+            source_field = self.field_combo.currentData()
+            target_field = self.get_target_field()
+            service_name = self.service.currentText()
+            source_lang = self.source_lang.currentText().lower()
+            target_lang = self.target_lang.currentText().lower()
             
-        # Validate field name if creating new field
-        if self.new_field_radio.isChecked():
-            if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', target_field):
+            if not layer or not source_field or not target_field:
                 QMessageBox.warning(
                     self,
-                    "Invalid Field Name",
-                    "Field name must start with a letter and contain only letters, numbers, and underscores."
+                    "Missing Information",
+                    "Please select a layer, source field, and target field."
                 )
                 return
                 
-        # Clear any previous progress
-        self.clear_progress()
-        
-        # Get translation settings
-        batch_mode = self.batch_mode.isChecked()
-        batch_size = self.batch_size.value()
-        
-        try:
+            # Validate field name if creating new field
+            if self.new_field_radio.isChecked():
+                if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', target_field):
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Field Name",
+                        "Field name must start with a letter and contain only letters, numbers, and underscores."
+                    )
+                    return
+                    
+            # Clear any previous progress
+            self.clear_progress()
+            
+            # Get translation settings
+            batch_mode = self.batch_mode.isChecked()
+            batch_size = self.batch_size.value()
+            prompt_template = self.prompt_template.toPlainText() if service_name in ['OpenAI', 'DeepSeek', 'Ollama'] else None
+            
             # Start translation with progress callback
             self.dialog.translation_manager.translate_column(
                 layer=layer,
@@ -303,13 +304,23 @@ class TranslationTab(QWidget):
                 target_lang=target_lang,
                 batch_mode=batch_mode,
                 batch_size=batch_size,
+                prompt_template=prompt_template,
                 progress_callback=self.update_progress
             )
             
-            # Disable translate button while processing
-            self.translate_button.setEnabled(False)
+            # Show info that translation has started
+            QMessageBox.information(
+                self,
+                "Translation Started",
+                "Translation task has started in the background.\nYou can start another translation while this one is running."
+            )
             
         except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Failed to start translation: {str(e)}",
+                'Clean Data',
+                Qgis.Critical
+            )
             QMessageBox.critical(
                 self,
                 "Translation Error",
@@ -318,7 +329,6 @@ class TranslationTab(QWidget):
             
     def task_finished(self, task):
         """Handle task completion"""
-        self.translate_button.setEnabled(True)
         self.clear_progress()
         
         if task.exception:
@@ -328,8 +338,15 @@ class TranslationTab(QWidget):
                 f"Translation failed: {str(task.exception)}"
             )
         else:
-            QMessageBox.information(
-                self,
-                "Success",
-                "Translation completed successfully!"
-            )
+            if hasattr(task, 'skipped_features') and task.skipped_features:
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    f"Translation completed successfully!\n\nSkipped {len(task.skipped_features)} features that were empty or already translated."
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Translation completed successfully!"
+                )
