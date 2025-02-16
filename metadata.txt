@@ -1,0 +1,10 @@
+[general]
+name=Clean Data
+qgisMinimumVersion=3.0
+description=A plugin for cleaning vector and tabular data in QGIS
+version=0.1
+author=Youssef Harby
+email=me@youssefharby.com
+
+[about]
+# About the plugin
