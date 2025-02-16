@@ -5,7 +5,7 @@ Main dialog for the Clean Data QGIS plugin.
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QComboBox, QLabel,
                                QPushButton, QLineEdit, QMessageBox, QTabWidget,
                                QCheckBox, QGroupBox, QPlainTextEdit, QHBoxLayout, QFormLayout, QSpinBox, QWidget, QTextEdit)
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.core import QgsProject, QgsVectorLayer, QgsMapLayerType, QgsMessageLog, Qgis
 
 from .modules import (
@@ -219,18 +219,76 @@ class CleanDataDialog(QDialog):
         layout.addWidget(self.source_field_combo)
         
         # New Column Option
-        new_column_group = QWidget()
-        new_column_layout = QHBoxLayout()
+        new_column_group = QGroupBox("New Column Options")
+        new_column_layout = QVBoxLayout()
         new_column_group.setLayout(new_column_layout)
         
+        # Checkbox row
+        checkbox_row = QWidget()
+        checkbox_layout = QHBoxLayout()
+        checkbox_row.setLayout(checkbox_layout)
+        
         self.create_new_column = QCheckBox('Create New Column')
-        new_column_layout.addWidget(self.create_new_column)
+        self.create_new_column.stateChanged.connect(self.on_create_new_column_changed)
+        checkbox_layout.addWidget(self.create_new_column)
+        
+        new_column_layout.addWidget(checkbox_row)
+        
+        # Name and type row
+        name_type_row = QWidget()
+        name_type_layout = QHBoxLayout()
+        name_type_row.setLayout(name_type_layout)
         
         self.new_column_name = QLineEdit()
-        self.new_column_name.setPlaceholderText('New column name (optional)')
+        self.new_column_name.setPlaceholderText('New column name')
         self.new_column_name.setEnabled(False)
-        new_column_layout.addWidget(self.new_column_name)
+        name_type_layout.addWidget(self.new_column_name)
         
+        self.new_column_type = QComboBox()
+        # Group types for better organization
+        data_types = [
+            # Text types
+            'TEXT',
+            # Integer types
+            'INTEGER',
+            'INT',
+            'SMALLINT',
+            'MEDIUMINT',
+            'TINYINT',
+            # Decimal types
+            'DOUBLE',
+            'FLOAT',
+            'REAL',
+            # Date/Time types
+            'DATE',
+            'DATETIME',
+            # Other types
+            'BOOLEAN',
+            'BLOB'
+        ]
+        self.new_column_type.addItems(data_types)
+        self.new_column_type.setEnabled(False)
+        
+        # Add tooltip explaining each type
+        type_tooltip = (
+            "Data Types:\n"
+            "TEXT: String of any length\n"
+            "INTEGER/INT: Standard integer\n"
+            "SMALLINT: Small integer (-32768 to 32767)\n"
+            "MEDIUMINT: Medium integer (-8388608 to 8388607)\n"
+            "TINYINT: Tiny integer (-128 to 127)\n"
+            "DOUBLE: Double precision floating point\n"
+            "FLOAT: Single precision floating point\n"
+            "REAL: Real number\n"
+            "DATE: Date value (YYYY-MM-DD)\n"
+            "DATETIME: Date and time value\n"
+            "BOOLEAN: True/False value\n"
+            "BLOB: Binary data"
+        )
+        self.new_column_type.setToolTip(type_tooltip)
+        name_type_layout.addWidget(self.new_column_type)
+        
+        new_column_layout.addWidget(name_type_row)
         layout.addWidget(new_column_group)
         
         # Reference Layer
@@ -248,12 +306,14 @@ class CleanDataDialog(QDialog):
         layout.addWidget(QLabel('Replace Field (in Reference):'))
         layout.addWidget(self.replace_field_combo)
         
-        # Pattern Matching
-        pattern_group = QWidget()
+        # Pattern Matching Group
+        pattern_group = QGroupBox("Pattern Matching")
         pattern_layout = QVBoxLayout()
         pattern_group.setLayout(pattern_layout)
         
+        # Pattern Match Checkbox
         self.pattern_match = QCheckBox('Use Pattern Matching')
+        self.pattern_match.stateChanged.connect(self.on_pattern_match_changed)
         pattern_layout.addWidget(self.pattern_match)
         
         # Pattern help
@@ -268,52 +328,54 @@ class CleanDataDialog(QDialog):
         pattern_layout.addWidget(pattern_help)
         
         # Custom Pattern
+        pattern_input_group = QWidget()
+        pattern_input_layout = QHBoxLayout()
+        pattern_input_group.setLayout(pattern_input_layout)
+        
+        pattern_input_layout.addWidget(QLabel('Custom Pattern:'))
         self.custom_pattern = QLineEdit()
         self.custom_pattern.setText('\\d+')  # Set default pattern
         self.custom_pattern.setEnabled(False)
-        pattern_layout.addWidget(QLabel('Custom Pattern:'))
-        pattern_layout.addWidget(self.custom_pattern)
+        pattern_input_layout.addWidget(self.custom_pattern)
         
+        pattern_layout.addWidget(pattern_input_group)
         layout.addWidget(pattern_group)
         
-        # Zero Handling
+        # Zero Handling Group
+        zero_group = QGroupBox("Zero Handling")
+        zero_layout = QVBoxLayout()
+        zero_group.setLayout(zero_layout)
+        
         self.strip_zeros = QCheckBox('Strip Leading Zeros When Matching')
-        layout.addWidget(self.strip_zeros)
+        zero_layout.addWidget(self.strip_zeros)
         
         self.pad_zeros = QCheckBox('Pad Numbers with Zeros')
-        layout.addWidget(self.pad_zeros)
+        self.pad_zeros.stateChanged.connect(self.on_pad_zeros_changed)
+        zero_layout.addWidget(self.pad_zeros)
         
-        # Pad Length
+        pad_length_group = QWidget()
+        pad_length_layout = QHBoxLayout()
+        pad_length_group.setLayout(pad_length_layout)
+        
+        pad_length_layout.addWidget(QLabel('Pad Length:'))
         self.pad_length = QSpinBox()
         self.pad_length.setMinimum(1)
         self.pad_length.setMaximum(10)
-        self.pad_length.setValue(3)
-        layout.addWidget(QLabel('Pad Length:'))
-        layout.addWidget(self.pad_length)
+        self.pad_length.setValue(8)  # Default to 8 for city IDs
+        self.pad_length.setEnabled(False)
+        pad_length_layout.addWidget(self.pad_length)
+        
+        zero_layout.addWidget(pad_length_group)
+        layout.addWidget(zero_group)
         
         # Replace button
         self.replace_button = QPushButton('Find and Replace')
         self.replace_button.clicked.connect(self.on_find_replace_clicked)
         layout.addWidget(self.replace_button)
         
-        # Connect signals
-        self.source_layer_combo.currentIndexChanged.connect(
-            lambda: self.update_fields(self.source_layer_combo, self.source_field_combo)
-        )
-        self.ref_layer_combo.currentIndexChanged.connect(
-            lambda: self.update_fields(self.ref_layer_combo, self.find_field_combo)
-        )
-        self.ref_layer_combo.currentIndexChanged.connect(
-            lambda: self.update_fields(self.ref_layer_combo, self.replace_field_combo)
-        )
-        self.pattern_match.stateChanged.connect(self.on_pattern_match_changed)
-        self.create_new_column.stateChanged.connect(self.on_new_column_changed)
-        
-        layout.addStretch()
         tab.setLayout(layout)
-        
         return tab
-        
+
     def create_translation_tab(self):
         """Create the translation tab"""
         tab = QWidget()
@@ -579,42 +641,54 @@ Rules:
 
     def update_all_fields(self):
         """Update fields for all tabs"""
-        self.update_fields(self.null_layer_combo)
-        self.update_fields(self.source_layer_combo)
-        self.update_fields(self.ref_layer_combo)
-        self.update_fields(self.trans_layer_combo)
+        # Store current selections
+        null_layer = self.null_layer_combo.currentData()
+        source_layer = self.source_layer_combo.currentData()
+        ref_layer = self.ref_layer_combo.currentData()
+        trans_layer = self.trans_layer_combo.currentData()
+        
+        # Update fields for each layer
+        if null_layer:
+            self.update_fields(self.null_layer_combo)
+        if source_layer:
+            self.update_fields(self.source_layer_combo)
+        if ref_layer:
+            self.update_fields(self.ref_layer_combo)
+        if trans_layer:
+            self.update_fields(self.trans_layer_combo)
 
     def update_fields(self, combo, field_combo=None):
         """Update fields for a layer combo box"""
         layer = combo.currentData()
-        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
-            return
-
-        # Determine which field combos to update based on the source combo
         field_combos = []
-        if combo == self.null_layer_combo:
-            field_combos = [self.null_field_combo]
-        elif combo == self.source_layer_combo:
-            field_combos = [self.source_field_combo]
-        elif combo == self.ref_layer_combo:
-            field_combos = [self.find_field_combo, self.replace_field_combo]
-        elif combo == self.trans_layer_combo:
-            field_combos = [self.trans_field_combo]
         
-        # Update each field combo
-        fields = layer.fields()
-        for field_combo in field_combos:
-            current_field = field_combo.currentText()
-            field_combo.clear()
+        if combo == self.source_layer_combo:
+            field_combos.append(self.source_field_combo)
+        elif combo == self.ref_layer_combo:
+            field_combos.extend([self.find_field_combo, self.replace_field_combo])
+        elif combo == self.null_layer_combo:
+            field_combos.append(self.null_field_combo)
+        elif combo == self.trans_layer_combo:
+            field_combos.append(self.trans_field_combo)
             
-            for field in fields:
-                field_combo.addItem(field.name())
-            
-            # Try to restore the previously selected field
-            if current_field:
-                index = field_combo.findText(current_field)
-                if index >= 0:
-                    field_combo.setCurrentIndex(index)
+        for combo in field_combos:
+            current = combo.currentData()  # Store current selection
+            combo.clear()
+            if layer:
+                for field in layer.fields():
+                    field_type = field.typeName()
+                    field_name = field.name()
+                    field_alias = field.alias() or field_name
+                    display_text = f"{field_name} ({field_alias}) - {field_type}"
+                    combo.addItem(display_text, field_name)
+                
+                # Try to restore previous selection if field still exists
+                if current:
+                    idx = combo.findData(current)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        combo.setCurrentIndex(0)  # Select first item if previous field was deleted
 
     def get_layer_and_validate(self, combo, field_combo=None):
         """Get layer from combo and validate it"""
@@ -657,14 +731,17 @@ Rules:
             QMessageBox.warning(self, "Error", str(e))
 
     def on_delete_column_clicked(self):
-        """Delete a specific column from the layer"""
-        layer = self.get_layer_and_validate(self.null_layer_combo, self.null_field_combo)
-        if not layer:
+        """Handle delete column button click"""
+        layer = self.null_layer_combo.currentData()
+        field = self.get_selected_field_name(self.null_field_combo)
+        
+        if not layer or not field:
+            QMessageBox.warning(self, "Error", "Please select a layer and field.")
             return
             
-        field = self.null_field_combo.currentText()
-        if not field:
-            QMessageBox.warning(self, "Error", "Please select a field to delete.")
+        # Check if field exists
+        if layer.fields().indexFromName(field) == -1:
+            QMessageBox.warning(self, "Error", "Please select a valid field.")
             return
             
         # Confirm deletion
@@ -677,25 +754,35 @@ Rules:
         )
         
         if reply == QMessageBox.Yes:
-            # Delete the field
-            field_index = layer.fields().indexOf(field)
-            if field_index >= 0:
-                layer.startEditing()
-                layer.deleteAttribute(field_index)
-                layer.commitChanges()
+            try:
+                # Start editing if not already
+                if not layer.isEditable():
+                    layer.startEditing()
                 
-                QMessageBox.information(self, "Success", f'Column "{field}" deleted successfully!')
-                # Update fields after deletion
-                self.update_fields(self.null_layer_combo)
-            else:
-                QMessageBox.warning(self, "Error", f'Could not find field "{field}".')
+                # Delete the field
+                if layer.deleteAttribute(layer.fields().indexFromName(field)):
+                    layer.commitChanges()
+                    
+                    # Force layer to refresh its fields
+                    layer.updateFields()
+                    
+                    # Update UI
+                    self.update_all_fields()
+                    
+                    QMessageBox.information(self, "Success", f'Column "{field}" deleted successfully.')
+                else:
+                    layer.rollBack()
+                    QMessageBox.warning(self, "Error", f'Failed to delete column "{field}".')
+            except Exception as e:
+                layer.rollBack()
+                QMessageBox.warning(self, "Error", str(e))
 
     def on_find_replace_clicked(self):
         source_layer = self.source_layer_combo.currentData()
-        source_field = self.source_field_combo.currentText()
+        source_field = self.get_selected_field_name(self.source_field_combo)
         ref_layer = self.ref_layer_combo.currentData()
-        find_field = self.find_field_combo.currentText()
-        replace_field = self.replace_field_combo.currentText()
+        find_field = self.get_selected_field_name(self.find_field_combo)
+        replace_field = self.get_selected_field_name(self.replace_field_combo)
         
         if not source_layer or not source_field:
             QMessageBox.warning(self, "Error", "Please select a source layer and field.")
@@ -706,6 +793,11 @@ Rules:
             return
             
         try:
+            # Check field type
+            field_idx = source_layer.fields().indexFromName(source_field)
+            field = source_layer.fields()[field_idx]
+            is_integer = field.type() in [QVariant.Int, QVariant.LongLong, QVariant.UInt, QVariant.ULongLong]
+            
             pattern_match = self.pattern_match.isChecked()
             custom_pattern = self.custom_pattern.text() if pattern_match else None
             strip_zeros = self.strip_zeros.isChecked()
@@ -714,6 +806,30 @@ Rules:
             
             create_new = self.create_new_column.isChecked()
             new_name = self.new_column_name.text() if create_new else None
+            
+            # If trying to pad zeros on an integer field, suggest creating a new string field
+            if pad_zeros and is_integer and not create_new:
+                reply = QMessageBox.question(
+                    self,
+                    "Data Type Warning",
+                    f"The field '{source_field}' is an integer field which cannot store leading zeros. "
+                    "Would you like to create a new text field for the padded values?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    create_new = True
+                    new_name = f"{source_field}_formatted"
+                else:
+                    if not QMessageBox.question(
+                        self,
+                        "Continue?",
+                        "Without creating a new field, leading zeros will be lost. Continue anyway?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No
+                    ) == QMessageBox.Yes:
+                        return
             
             if create_new and not new_name:
                 new_name = f"{source_field}_new"
@@ -738,7 +854,8 @@ Rules:
                 pad_zeros,
                 pad_length,
                 create_new_column=create_new,
-                new_column_name=new_name
+                new_column_name=new_name,
+                new_column_type=self.new_column_type.currentText() if create_new else None
             )
             
             if count > 0:
@@ -747,6 +864,9 @@ Rules:
                     msg += f"\nCreated new column: {new_name}"
                     # Refresh all field combos that show this layer
                     self.update_all_fields()
+                else:
+                    if is_integer and pad_zeros:
+                        msg += "\nNote: Leading zeros may be lost because this is an integer field."
                 QMessageBox.information(self, "Success", msg)
                 source_layer.commitChanges()
             else:
@@ -757,59 +877,49 @@ Rules:
             QMessageBox.warning(self, "Error", str(e))
             source_layer.rollBack()
             
-    def update_all_fields(self):
-        """Update fields for all tabs"""
-        # Store current selections
-        null_layer = self.null_layer_combo.currentData()
-        null_field = self.null_field_combo.currentText()
-        source_layer = self.source_layer_combo.currentData()
-        source_field = self.source_field_combo.currentText()
-        ref_layer = self.ref_layer_combo.currentData()
-        ref_find = self.find_field_combo.currentText()
-        ref_replace = self.replace_field_combo.currentText()
-        trans_layer = self.trans_layer_combo.currentData()
-        trans_field = self.trans_field_combo.currentText()
-        
-        # Update all fields
-        if null_layer:
-            self.update_fields(self.null_layer_combo)
-            # Restore selection if field still exists
-            idx = self.null_field_combo.findText(null_field)
-            if idx >= 0:
-                self.null_field_combo.setCurrentIndex(idx)
-                
-        if source_layer:
-            self.update_fields(self.source_layer_combo)
-            idx = self.source_field_combo.findText(source_field)
-            if idx >= 0:
-                self.source_field_combo.setCurrentIndex(idx)
-                
-        if ref_layer:
-            self.update_fields(self.ref_layer_combo)
-            idx = self.find_field_combo.findText(ref_find)
-            if idx >= 0:
-                self.find_field_combo.setCurrentIndex(idx)
-            idx = self.replace_field_combo.findText(ref_replace)
-            if idx >= 0:
-                self.replace_field_combo.setCurrentIndex(idx)
-                
-        if trans_layer:
-            self.update_fields(self.trans_layer_combo)
-            idx = self.trans_field_combo.findText(trans_field)
-            if idx >= 0:
-                self.trans_field_combo.setCurrentIndex(idx)
+    def get_selected_field_name(self, combo):
+        """Get the actual field name from combo box selection"""
+        return combo.currentData() or combo.currentText().split(' (')[0]
 
     def on_pattern_match_changed(self, state):
         """Handle pattern match checkbox state change"""
-        self.custom_pattern.setEnabled(state)
-        if not state:
-            self.custom_pattern.clear()
+        is_checked = state == Qt.Checked
+        self.custom_pattern.setEnabled(is_checked)
+        if is_checked and not self.custom_pattern.text():
+            self.custom_pattern.setText('\\d+')  # Set default pattern if empty
+        
+    def on_pad_zeros_changed(self, state):
+        """Handle pad zeros checkbox state change"""
+        is_checked = state == Qt.Checked
+        self.pad_length.setEnabled(is_checked)
+        
+        # If enabling pad zeros, suggest pattern matching with \d+
+        if is_checked and not self.pattern_match.isChecked():
+            reply = QMessageBox.question(
+                self,
+                "Enable Pattern Matching?",
+                "Would you like to enable pattern matching with '\\d+' for better number detection?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.pattern_match.setChecked(True)
+                self.custom_pattern.setText('\\d+')
 
-    def on_new_column_changed(self, state):
-        """Handle new column checkbox state change"""
-        self.new_column_name.setEnabled(bool(state))
-        if not state:
+    def on_create_new_column_changed(self, state):
+        """Handle create new column checkbox state change"""
+        is_checked = state == Qt.Checked
+        self.new_column_name.setEnabled(is_checked)
+        self.new_column_type.setEnabled(is_checked)
+        if not is_checked:
             self.new_column_name.clear()
+        elif not self.new_column_name.text():
+            # Suggest a name based on the current field
+            source_field = self.get_selected_field_name(self.source_field_combo)
+            if source_field:
+                self.new_column_name.setText(f"{source_field}_formatted")
+                # Set default type to String for ID fields
+                self.new_column_type.setCurrentText('String')
 
     def load_settings(self):
         """Load settings from QgsSettings"""
@@ -884,13 +994,16 @@ Rules:
 
     def on_clean_field_clicked(self):
         """Handle clean field button click"""
-        layer = self.get_layer_and_validate(self.null_layer_combo, self.null_field_combo)
-        if not layer:
+        layer = self.null_layer_combo.currentData()
+        field = self.get_selected_field_name(self.null_field_combo)
+        
+        if not layer or not field:
+            QMessageBox.warning(self, "Error", "Please select a layer and field.")
             return
             
-        field = self.null_field_combo.currentText()
-        if not field:
-            QMessageBox.warning(self, "Error", "Please select a field to clean.")
+        # Check if field exists
+        if layer.fields().indexFromName(field) == -1:
+            QMessageBox.warning(self, "Error", "Please select a valid field.")
             return
             
         try:
@@ -899,12 +1012,52 @@ Rules:
                 QMessageBox.warning(self, "Error", "Threshold must be between 0 and 100.")
                 return
                 
-            if self.cleaning_manager.remove_columns_with_null_percentage(layer, field, threshold):
-                QMessageBox.information(self, "Success", "Field cleaned successfully!")
-                # Update fields in case columns were removed
-                self.update_fields(self.null_layer_combo)
-            else:
-                QMessageBox.information(self, "Info", "No changes were needed.")
+            # Start editing if not already
+            if not layer.isEditable():
+                layer.startEditing()
                 
-        except ValueError as e:
+            # Get null count
+            null_count = 0
+            total_count = layer.featureCount()
+            
+            for feature in layer.getFeatures():
+                if not feature[field] or str(feature[field]).strip() == '':
+                    null_count += 1
+                    
+            if total_count == 0:
+                percentage = 0
+            else:
+                percentage = (null_count / total_count) * 100
+                
+            if percentage >= threshold:
+                # Delete the field
+                if layer.deleteAttribute(layer.fields().indexFromName(field)):
+                    layer.commitChanges()
+                    
+                    # Force layer to refresh its fields
+                    layer.updateFields()
+                    
+                    # Update UI
+                    self.update_all_fields()
+                    
+                    QMessageBox.information(
+                        self,
+                        "Success",
+                        f'Column "{field}" deleted (had {percentage:.1f}% null values).'
+                    )
+                else:
+                    layer.rollBack()
+                    QMessageBox.warning(self, "Error", f'Failed to delete column "{field}".')
+            else:
+                layer.rollBack()
+                QMessageBox.information(
+                    self,
+                    "Info",
+                    f'Column "{field}" has {percentage:.1f}% null values, below threshold of {threshold}%.'
+                )
+        except ValueError:
+            layer.rollBack()
+            QMessageBox.warning(self, "Error", "Please enter a valid number for threshold.")
+        except Exception as e:
+            layer.rollBack()
             QMessageBox.warning(self, "Error", str(e))
