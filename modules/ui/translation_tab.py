@@ -4,7 +4,8 @@ Translation tab UI module for Clean Data QGIS plugin.
 from qgis.PyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QGroupBox, QLabel, QComboBox, QLineEdit, 
                                 QPushButton, QTextEdit, QMessageBox, QSpacerItem,
-                                QSizePolicy, QCheckBox, QSpinBox)
+                                QSizePolicy, QCheckBox, QSpinBox, QRadioButton,
+                                QButtonGroup)
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsMessageLog, Qgis, QgsProject, QgsVectorLayer
 import re
@@ -40,14 +41,50 @@ class TranslationTab(QWidget):
         self.field_combo = QComboBox()
         layer_grid.addWidget(self.field_combo, 1, 1)
         
-        # New field name
-        layer_grid.addWidget(QLabel("New Field Name:"), 2, 0)
+        # Target field options
+        target_group = QGroupBox("Target Field")
+        target_layout = QVBoxLayout()
+        
+        # Radio buttons for field selection
+        self.field_button_group = QButtonGroup()
+        
+        # New field option
+        new_field_layout = QHBoxLayout()
+        self.new_field_radio = QRadioButton("Create New Field:")
+        self.new_field_radio.setChecked(True)  # Default to new field
+        self.field_button_group.addButton(self.new_field_radio)
+        new_field_layout.addWidget(self.new_field_radio)
+        
         self.new_field = QLineEdit()
         self.new_field.setPlaceholderText("e.g., name_en, description_fr")
-        layer_grid.addWidget(self.new_field, 2, 1)
+        new_field_layout.addWidget(self.new_field)
+        target_layout.addLayout(new_field_layout)
+        
+        # Existing field option
+        existing_field_layout = QHBoxLayout()
+        self.existing_field_radio = QRadioButton("Use Existing Field:")
+        self.field_button_group.addButton(self.existing_field_radio)
+        existing_field_layout.addWidget(self.existing_field_radio)
+        
+        self.target_field_combo = QComboBox()
+        self.target_field_combo.setEnabled(False)  # Disabled by default
+        existing_field_layout.addWidget(self.target_field_combo)
+        target_layout.addLayout(existing_field_layout)
+        
+        # Connect radio buttons
+        self.new_field_radio.toggled.connect(self.toggle_field_selection)
+        
+        target_group.setLayout(target_layout)
+        layer_grid.addWidget(target_group, 2, 0, 1, 2)
         
         layer_group.setLayout(layer_grid)
         main_layout.addWidget(layer_group)
+        
+        # Progress label
+        self.progress_label = QLabel("")
+        self.progress_label.setAlignment(Qt.AlignCenter)
+        self.progress_label.setVisible(False)
+        main_layout.addWidget(self.progress_label)
         
         # Translation Settings
         trans_group = QGroupBox("Translation Settings")
@@ -131,9 +168,9 @@ class TranslationTab(QWidget):
         # Translate button with some padding
         button_layout = QHBoxLayout()
         button_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        self.translate_btn = QPushButton("Translate Field")
-        self.translate_btn.setMinimumWidth(150)
-        button_layout.addWidget(self.translate_btn)
+        self.translate_button = QPushButton("Translate Field")
+        self.translate_button.setMinimumWidth(150)
+        button_layout.addWidget(self.translate_button)
         button_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
         main_layout.addLayout(button_layout)
         
@@ -145,21 +182,24 @@ class TranslationTab(QWidget):
         # Connect signals
         self.layer_combo.currentIndexChanged.connect(self.on_layer_changed)
         self.service.currentTextChanged.connect(self.update_translation_settings)
-        self.translate_btn.clicked.connect(self.on_translate)
+        self.translate_button.clicked.connect(self.handle_translate)
         
         # Initialize UI state
         self.update_translation_settings()
         
     def populate_layers(self):
-        """Populate layer combo with vector layers"""
+        """Populate layer combo with vector layers from QGIS canvas"""
         self.layer_combo.clear()
-        for layer in self.project.mapLayers().values():
+        
+        for layer in QgsProject.instance().mapLayers().values():
             if isinstance(layer, QgsVectorLayer) and layer.isValid():
                 self.layer_combo.addItem(layer.name(), layer)
                 
     def on_layer_changed(self, index):
-        """Update fields when layer changes"""
+        """Update field combos when layer changes"""
         self.field_combo.clear()
+        self.target_field_combo.clear()
+        
         layer = self.layer_combo.currentData()
         if layer:
             for field in layer.fields():
@@ -168,7 +208,34 @@ class TranslationTab(QWidget):
                 field_alias = field.alias() or field_name
                 display_text = f"{field_name} ({field_alias}) - {field_type}"
                 self.field_combo.addItem(display_text, field_name)
+                self.target_field_combo.addItem(display_text, field_name)
                 
+    def toggle_field_selection(self, checked):
+        """Toggle between new field and existing field options"""
+        self.new_field.setEnabled(checked)
+        self.target_field_combo.setEnabled(not checked)
+        
+    def get_target_field(self):
+        """Get the target field name based on selection"""
+        if self.new_field_radio.isChecked():
+            return self.new_field.text().strip()
+        else:
+            # Get the field name from the combo box data, not the display text
+            return self.target_field_combo.currentData()
+            
+    def update_progress(self, task):
+        """Update progress label with task progress"""
+        if hasattr(task, 'total_features') and hasattr(task, 'translated_count'):
+            self.progress_label.setText(
+                f"Processing: {task.translated_count}/{task.total_features} features"
+            )
+            self.progress_label.setVisible(True)
+            
+    def clear_progress(self):
+        """Clear the progress label"""
+        self.progress_label.setText("")
+        self.progress_label.setVisible(False)
+        
     def update_translation_settings(self):
         """Update UI based on selected service"""
         service = self.service.currentText()
@@ -191,54 +258,78 @@ class TranslationTab(QWidget):
             self.target_lang.clear()
             self.target_lang.addItems(['en', 'ar', 'fr', 'es', 'de'])
             
-    def on_translate(self):
+    def handle_translate(self):
         """Handle translate button click"""
         layer = self.layer_combo.currentData()
         source_field = self.field_combo.currentData()
-        target_field = self.new_field.text().strip()
+        target_field = self.get_target_field()
         service_name = self.service.currentText()
         source_lang = self.source_lang.currentText().lower()
         target_lang = self.target_lang.currentText().lower()
         
-        # Basic validation
-        if not layer or not source_field:
-            QMessageBox.warning(self, "Error", "Please select a layer and field to translate.")
-            return
-            
-        if not target_field:
-            QMessageBox.warning(self, "Error", "Please enter a name for the new translated field.")
-            return
-            
-        # Validate field name
-        if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', target_field):
+        if not layer or not source_field or not target_field:
             QMessageBox.warning(
                 self,
-                "Invalid Field Name",
-                "Field name must start with a letter and contain only letters, numbers, and underscores."
+                "Missing Information",
+                "Please select a layer, source field, and target field."
             )
             return
             
+        # Validate field name if creating new field
+        if self.new_field_radio.isChecked():
+            if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', target_field):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Field Name",
+                    "Field name must start with a letter and contain only letters, numbers, and underscores."
+                )
+                return
+                
+        # Clear any previous progress
+        self.clear_progress()
+        
+        # Get translation settings
+        batch_mode = self.batch_mode.isChecked()
+        batch_size = self.batch_size.value()
+        
         try:
-            # Get the appropriate prompt template based on batch mode
-            if self.batch_mode.isChecked():
-                prompt_template = SettingsManager.get_batch_translation_prompt()
-            else:
-                prompt_template = SettingsManager.get_translation_prompt()
-            
-            # Call the translation manager
+            # Start translation with progress callback
             self.dialog.translation_manager.translate_column(
                 layer=layer,
                 source_field=source_field,
                 target_field=target_field,
-                prompt_template=prompt_template,
                 service_name=service_name,
                 source_lang=source_lang,
                 target_lang=target_lang,
-                batch_mode=self.batch_mode.isChecked(),
-                batch_size=self.batch_size.value() if self.batch_mode.isChecked() else 1
+                batch_mode=batch_mode,
+                batch_size=batch_size,
+                progress_callback=self.update_progress
             )
             
-            QMessageBox.information(self, "Success", "Translation completed successfully!")
+            # Disable translate button while processing
+            self.translate_button.setEnabled(False)
             
         except Exception as e:
-            QMessageBox.warning(self, "Error", str(e))
+            QMessageBox.critical(
+                self,
+                "Translation Error",
+                f"Failed to start translation: {str(e)}"
+            )
+            
+    def task_finished(self, task):
+        """Handle task completion"""
+        self.translate_button.setEnabled(True)
+        self.clear_progress()
+        
+        if task.exception:
+            QMessageBox.critical(
+                self,
+                "Translation Error",
+                f"Translation failed: {str(task.exception)}"
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Success",
+                "Translation completed successfully!"
+            )

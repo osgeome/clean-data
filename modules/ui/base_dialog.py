@@ -4,8 +4,7 @@ Base dialog for Clean Data QGIS plugin.
 from qgis.PyQt.QtWidgets import QDialog, QTabWidget, QVBoxLayout, QMessageBox
 from qgis.core import QgsProject, QgsVectorLayer, QgsMessageLog, Qgis
 
-from ..translation import TranslationManager
-from ..settings_manager import SettingsManager
+from .. import TranslationManager, SettingsManager, CleaningManager
 from .translation_tab import TranslationTab
 from .null_cleaning_tab import NullCleaningTab
 from .find_replace_tab import FindReplaceTab
@@ -19,6 +18,7 @@ class CleanDataDialog(QDialog):
         self.iface = iface
         self.translation_manager = TranslationManager()
         self.settings_manager = SettingsManager()
+        self.cleaning_manager = CleaningManager()
         self.project = QgsProject.instance()
         
         # Store references to layer combos for easy updates

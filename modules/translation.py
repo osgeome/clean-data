@@ -16,12 +16,65 @@ class TranslationService:
 
 class GoogleTranslateService(TranslationService):
     """Google Translate API implementation"""
-    def translate(self, texts, target_lang, **kwargs):
+    def __init__(self):
+        self.base_url = "https://translation.googleapis.com/language/translate/v2"
+        
+    def translate(self, texts, target_lang, source_lang='auto', **kwargs):
+        """Translate texts using Google Translate API
+        
+        Args:
+            texts (list): List of texts to translate
+            target_lang (str): Target language code
+            source_lang (str): Source language code, defaults to 'auto'
+            **kwargs: Additional arguments
+            
+        Returns:
+            list: List of translated texts
+            
+        Raises:
+            ValueError: If API key is not configured
+            Exception: If translation fails
+        """
         api_key = SettingsManager.get_google_api_key()
         if not api_key:
-            raise ValueError("Google Translate API key not configured")
-        # Implement Google Translate logic here
-        pass
+            raise ValueError("Google Translate API key not configured. Please add your API key in Settings.")
+            
+        translations = []
+        for text in texts:
+            # Skip empty texts
+            if not text:
+                translations.append("")
+                continue
+                
+            try:
+                params = {
+                    'q': text,
+                    'target': target_lang,
+                    'key': api_key
+                }
+                
+                if source_lang and source_lang != 'auto':
+                    params['source'] = source_lang
+                    
+                response = requests.post(self.base_url, params=params)
+                response.raise_for_status()
+                
+                data = response.json()
+                if 'data' in data and 'translations' in data['data']:
+                    translation = data['data']['translations'][0]['translatedText']
+                    translations.append(translation)
+                else:
+                    raise Exception("Invalid response format from Google Translate API")
+                    
+            except requests.exceptions.RequestException as e:
+                QgsMessageLog.logMessage(
+                    f"Google Translate API error: {str(e)}",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                translations.append("")
+                
+        return translations
 
 class OllamaService(TranslationService):
     """Ollama API implementation"""
@@ -307,7 +360,8 @@ class TranslationTask(QgsTask):
     
     def __init__(self, description, layer, source_field, target_field, service, 
                  target_lang='ar', model=None, batch_mode=True, batch_size=10,
-                 prompt_template=None, source_lang='auto', instructions=''):
+                 prompt_template=None, source_lang='auto', instructions='', 
+                 callback=None):
         super().__init__(description, QgsTask.CanCancel)
         
         # Store parameters
@@ -322,6 +376,7 @@ class TranslationTask(QgsTask):
         self.prompt_template = prompt_template
         self.source_lang = source_lang
         self.instructions = instructions
+        self.callback = callback
         
         # Initialize state
         self.features_to_translate = []
@@ -329,110 +384,235 @@ class TranslationTask(QgsTask):
         self.translated_count = 0
         self.exception = None
         
-    def prepare_features(self):
-        """Get features that need translation"""
-        source_idx = self.layer.fields().indexOf(self.source_field)
-        target_idx = self.layer.fields().indexOf(self.target_field)
-        
-        # Add target field if it doesn't exist
-        if target_idx == -1:
-            self.layer.dataProvider().addAttributes([QgsField(self.target_field, QVariant.String)])
-            self.layer.updateFields()
-            target_idx = self.layer.fields().indexOf(self.target_field)
-            
-        # Get features needing translation
-        for feature in self.layer.getFeatures():
-            source_text = feature[self.source_field]
-            target_text = feature[self.target_field]
-            
-            # Skip if source is empty or target already has value
-            if not source_text or (target_text and str(target_text).strip()):
-                continue
-                
-            self.features_to_translate.append(feature)
-            
-        self.total_features = len(self.features_to_translate)
-        return self.total_features > 0
-        
     def run(self):
-        """Run the task in background"""
+        """Run the translation task"""
         try:
-            if not self.prepare_features():
-                return True
-                
+            # First, get all features and store them in memory
+            all_features = []
+            feature_map = {}
+            
+            # Get source field index first
+            source_idx = self.layer.fields().indexOf(self.source_field)
+            if source_idx < 0:
+                raise ValueError(f"Source field '{self.source_field}' not found in layer")
+            
+            # Create target field if it doesn't exist
+            target_idx = self.layer.fields().indexOf(self.target_field)
+            if target_idx < 0:
+                self.layer.startEditing()
+                self.layer.addAttribute(QgsField(self.target_field, QVariant.String))
+                if not self.layer.commitChanges():
+                    raise Exception("Failed to add target field to layer")
+                target_idx = self.layer.fields().indexOf(self.target_field)
+            
+            # Store initial feature count for verification
+            initial_count = self.layer.featureCount()
             QgsMessageLog.logMessage(
-                f"Starting translation of {self.total_features} features...",
+                f"Initial feature count: {initial_count}",
                 'Clean Data',
                 Qgis.Info
             )
             
-            # Process in batches
-            current_batch = []
-            batch_features = []
-            target_idx = self.layer.fields().indexOf(self.target_field)
+            # Safely get all features first
+            request = QgsFeatureRequest()
+            request.setFlags(QgsFeatureRequest.NoGeometry)  # We don't need geometry
+            request.setSubsetOfAttributes([source_idx])  # Only get the source field
             
-            self.layer.startEditing()
+            for feature in self.layer.getFeatures(request):
+                fid = feature.id()
+                text = feature[source_idx]
+                
+                # Store feature data
+                feature_data = {
+                    'id': fid,
+                    'text': text,
+                    'translated': False
+                }
+                
+                all_features.append(feature_data)
+                if text:  # Only track non-empty values for translation
+                    feature_map[fid] = feature_data
             
-            for feature in self.features_to_translate:
-                if self.isCanceled():
-                    return False
+            self.total_features = len(feature_map)
+            if self.total_features == 0:
+                QgsMessageLog.logMessage(
+                    "No features to translate",
+                    'Clean Data',
+                    Qgis.Warning
+                )
+                return True
+            
+            QgsMessageLog.logMessage(
+                f"Found {self.total_features} features with non-empty values to translate",
+                'Clean Data',
+                Qgis.Info
+            )
+            
+            # Process in smaller chunks
+            chunk_size = 25  # Even smaller chunks
+            batch_size = min(2, self.batch_size)  # Minimal batch size
+            
+            # Start editing once for all changes
+            if not self.layer.startEditing():
+                raise Exception("Failed to start editing layer")
+            
+            try:
+                # Process features in chunks
+                feature_ids = list(feature_map.keys())
+                for chunk_start in range(0, len(feature_ids), chunk_size):
+                    if self.isCanceled():
+                        self.layer.rollBack()
+                        return False
                     
-                text = str(feature[self.source_field])
-                if text:
-                    current_batch.append(text)
-                    batch_features.append(feature)
+                    chunk_end = min(chunk_start + chunk_size, len(feature_ids))
+                    chunk_ids = feature_ids[chunk_start:chunk_end]
                     
-                    # Process batch when it reaches size limit
-                    if len(current_batch) >= self.batch_size:
-                        success = self.process_batch(current_batch, batch_features, target_idx)
-                        if not success:
+                    # Process in small batches
+                    for i in range(0, len(chunk_ids), batch_size):
+                        if self.isCanceled():
+                            self.layer.rollBack()
                             return False
-                        current_batch = []
-                        batch_features = []
                         
-            # Process remaining items
-            if current_batch and not self.isCanceled():
-                success = self.process_batch(current_batch, batch_features, target_idx)
-                if not success:
-                    return False
+                        batch_ids = chunk_ids[i:i + batch_size]
+                        batch_texts = [feature_map[fid]['text'] for fid in batch_ids]
+                        
+                        # Translate batch
+                        translations = self.service.translate(
+                            texts=batch_texts,
+                            target_lang=self.target_lang,
+                            model=self.model,
+                            batch_mode=self.batch_mode,
+                            batch_size=len(batch_texts),
+                            prompt_template=self.prompt_template,
+                            source_lang=self.source_lang,
+                            instructions=self.instructions
+                        )
+                        
+                        # Update features
+                        for fid, translation in zip(batch_ids, translations):
+                            if not self.layer.changeAttributeValue(fid, target_idx, translation):
+                                QgsMessageLog.logMessage(
+                                    f"Failed to update feature {fid}",
+                                    'Clean Data',
+                                    Qgis.Warning
+                                )
+                            else:
+                                feature_map[fid]['translated'] = True
+                                self.translated_count += 1
+                        
+                        # Report progress
+                        progress = (self.translated_count / self.total_features) * 100
+                        self.setProgress(progress)
+                        
+                        # Call progress callback
+                        if self.callback:
+                            self.callback(self)
+                        
+                        QgsMessageLog.logMessage(
+                            f"Translated {self.translated_count}/{self.total_features} features...",
+                            'Clean Data',
+                            Qgis.Info
+                        )
                     
-            return True
+                    QgsMessageLog.logMessage(
+                        f"Processed chunk {chunk_start}-{chunk_end}",
+                        'Clean Data',
+                        Qgis.Info
+                    )
+                
+                # Verify all features were translated
+                untranslated = [
+                    fid for fid, data in feature_map.items() 
+                    if not data['translated']
+                ]
+                
+                if untranslated:
+                    QgsMessageLog.logMessage(
+                        f"Warning: {len(untranslated)} features were not translated",
+                        'Clean Data',
+                        Qgis.Warning
+                    )
+                
+                # Commit changes
+                if not self.layer.commitChanges():
+                    raise Exception("Failed to commit changes to layer")
+                
+                # Final verification
+                final_count = self.layer.featureCount()
+                if final_count != initial_count:
+                    raise Exception(
+                        f"Layer corruption detected! Initial count: {initial_count}, "
+                        f"Final count: {final_count}"
+                    )
+                
+                return True
+                
+            except Exception as e:
+                self.layer.rollBack()
+                raise e
             
         except Exception as e:
             self.exception = e
+            QgsMessageLog.logMessage(
+                f"Translation failed: {str(e)}",
+                'Clean Data',
+                Qgis.Critical
+            )
             return False
+
+    def finished(self, result):
+        """Called when the task is complete"""
+        if result:
+            QgsMessageLog.logMessage(
+                "Translation completed successfully",
+                'Clean Data',
+                Qgis.Success
+            )
+        elif self.exception:
+            QgsMessageLog.logMessage(
+                f"Translation failed: {str(self.exception)}",
+                'Clean Data',
+                Qgis.Critical
+            )
+        else:
+            QgsMessageLog.logMessage(
+                "Translation was cancelled",
+                'Clean Data',
+                Qgis.Warning
+            )
             
     def process_batch(self, texts, features, target_idx):
         """Process a batch of texts"""
         try:
+            # Translate the batch
             translations = self.service.translate(
                 texts=texts,
                 target_lang=self.target_lang,
                 model=self.model,
                 batch_mode=self.batch_mode,
-                batch_size=self.batch_size,
+                batch_size=len(texts),
                 prompt_template=self.prompt_template,
                 source_lang=self.source_lang,
                 instructions=self.instructions
             )
             
-            # Update features with translations
+            # Update features
             for feat, trans in zip(features, translations):
-                self.layer.changeAttributeValue(feat.id(), target_idx, trans)
+                if not self.layer.changeAttributeValue(feat.id(), target_idx, trans):
+                    QgsMessageLog.logMessage(
+                        f"Failed to update feature {feat.id()}",
+                        'Clean Data',
+                        Qgis.Warning
+                    )
                 self.translated_count += 1
                 
-            # Commit changes after each batch
-            if not self.layer.commitChanges():
-                QgsMessageLog.logMessage(
-                    "Failed to commit changes to layer",
-                    'Clean Data',
-                    Qgis.Warning
-                )
-            self.layer.startEditing()
-            
             # Report progress
             progress = (self.translated_count / self.total_features) * 100
             self.setProgress(progress)
+            
+            # Call progress callback if provided
+            if self.callback:
+                self.callback(self)
             
             QgsMessageLog.logMessage(
                 f"Translated {self.translated_count}/{self.total_features} features...",
@@ -443,42 +623,13 @@ class TranslationTask(QgsTask):
             return True
             
         except Exception as e:
+            self.exception = e
             QgsMessageLog.logMessage(
                 f"Batch translation error: {str(e)}. Continuing with next batch...",
                 'Clean Data',
                 Qgis.Warning
             )
             return False
-            
-    def finished(self, result):
-        """Called when the task is complete"""
-        if result:
-            QgsMessageLog.logMessage(
-                f"Successfully translated {self.translated_count} out of {self.total_features} features",
-                'Clean Data',
-                Qgis.Success
-            )
-        else:
-            if self.exception:
-                QgsMessageLog.logMessage(
-                    f"Translation failed: {str(self.exception)}",
-                    'Clean Data',
-                    Qgis.Critical
-                )
-            else:
-                QgsMessageLog.logMessage(
-                    "Translation was canceled",
-                    'Clean Data',
-                    Qgis.Warning
-                )
-                
-    def cancel(self):
-        QgsMessageLog.logMessage(
-            "Translation task was canceled by user",
-            'Clean Data',
-            Qgis.Info
-        )
-        super().cancel()
 
 class TranslationManager:
     """Manager class for handling translations"""
@@ -488,16 +639,17 @@ class TranslationManager:
         
     def get_service(self, service_name):
         """Get translation service instance based on name"""
-        if service_name.lower() == 'google':
+        service_name = service_name.lower().replace(' ', '')
+        if service_name in ['google', 'googletranslate']:
             return GoogleTranslateService()
-        elif service_name.lower() == 'ollama':
+        elif service_name in ['ollama', 'ollamaapi']:
             return OllamaService()
         else:
             raise ValueError(f"Unknown translation service: {service_name}")
             
     def translate_column(self, layer, source_field, target_field, prompt_template=None, 
                         service_name='Ollama', model=None, source_lang='auto', target_lang='ar', 
-                        instructions='', batch_mode=True, batch_size=10):
+                        instructions='', batch_mode=True, batch_size=10, progress_callback=None):
         """Translate a column in a vector layer using background task
         
         Args:
@@ -512,6 +664,7 @@ class TranslationManager:
             instructions (str, optional): Additional instructions. Defaults to ''.
             batch_mode (bool, optional): Whether to use batch mode. Defaults to True.
             batch_size (int, optional): Number of texts to translate at once in batch mode. Defaults to 10.
+            progress_callback (callable, optional): Callback function for progress updates. Defaults to None.
         """
         try:
             # Get translation service
@@ -547,7 +700,8 @@ class TranslationManager:
                 batch_size=batch_size,
                 prompt_template=prompt_template,
                 source_lang=source_lang,
-                instructions=instructions
+                instructions=instructions,
+                callback=progress_callback
             )
             
             QgsApplication.taskManager().addTask(self.task)
