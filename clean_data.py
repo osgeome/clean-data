@@ -1,41 +1,40 @@
+"""
+Main plugin module for Clean Data QGIS plugin.
+"""
+
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
 import os.path
 
 from .clean_data_dialog import CleanDataDialog
 
-class CleanDataPlugin:
+class CleanData:
+    """QGIS Plugin Implementation."""
+
     def __init__(self, iface):
         self.iface = iface
-        self.dialog = None
+        self.plugin_dir = os.path.dirname(__file__)
         self.actions = []
         self.menu = 'Clean Data'
         self.toolbar = self.iface.addToolBar('Clean Data')
         self.toolbar.setObjectName('CleanData')
-
-    def add_action(self, icon_path, text, callback):
-        icon = QIcon(icon_path) if icon_path else QIcon()
-        action = QAction(icon, text, self.iface.mainWindow())
-        action.triggered.connect(callback)
-        
-        self.iface.addToolBarIcon(action)
-        self.iface.addPluginToMenu(self.menu, action)
-        self.actions.append(action)
-        return action
+        self.dialog = None
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-        icon_path = os.path.join(os.path.dirname(__file__), 'icon.png')
-        self.add_action(
-            icon_path,
-            text='Clean Data',
-            callback=self.run
-        )
+        icon = QIcon(os.path.join(self.plugin_dir, 'icon.png'))
+        action = QAction(icon, 'Clean Data', self.iface.mainWindow())
+        action.triggered.connect(self.run)
+        action.setEnabled(True)
+        
+        self.toolbar.addAction(action)
+        self.iface.addPluginToVectorMenu(self.menu, action)
+        self.actions.append(action)
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
-            self.iface.removePluginMenu('Clean Data', action)
+            self.iface.removePluginVectorMenu(self.menu, action)
             self.iface.removeToolBarIcon(action)
         del self.toolbar
 
