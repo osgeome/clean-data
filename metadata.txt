@@ -1,10 +1,25 @@
 [general]
 name=Clean Data
 qgisMinimumVersion=3.0
-description=A plugin for cleaning vector and tabular data in QGIS
+description=A powerful plugin for cleaning, transforming, and managing vector layer data with advanced features including field translation using AI models.
+about=Clean Data is a comprehensive QGIS plugin that helps you clean and transform your vector data. Features include field translation using various AI services (Google Translate, Ollama, OpenAI, DeepSeek), null value cleaning, and advanced find & replace functionality.
 version=0.1
 author=Youssef Harby
 email=me@youssefharby.com
+repository=https://github.com/osgeome/clean-data
+homepage=https://github.com/osgeome/clean-data
+tracker=https://github.com/osgeome/clean-data/issues
+tags=vector, cleaning, translation, ai, data processing, null values, find and replace
+icon=icon.png
+experimental=True
+deprecated=False
+category=Vector
+changelog=
+    0.1:
+    - Initial release
+    - Field translation using multiple AI services
+    - Null value cleaning
+    - Find and replace functionality
 
 [about]
 # About the plugin
