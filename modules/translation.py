@@ -4,7 +4,7 @@ Handles all translation-related functionality.
 """
 
 from qgis.core import (QgsTask, QgsApplication, QgsMessageLog, Qgis, 
-                      QgsVectorLayer, QgsField, QgsFeature)
+                      QgsVectorLayer, QgsField, QgsFeature, QgsFeatureRequest)
 from PyQt5.QtCore import QVariant
 import requests
 from .settings_manager import SettingsManager
