@@ -10,6 +10,26 @@ class SettingsManager:
     
     SETTINGS_PREFIX = "CleanData/"
     
+    # Default Templates
+    DEFAULT_SINGLE_TRANSLATION_PROMPT = (
+        "Translate the following text to {target_lang}:\n"
+        "Text: {text}\n"
+        "Rules:\n"
+        "1. Maintain the original meaning and style\n"
+        "2. Return ONLY the translation, no explanations\n"
+        "3. Keep any special characters or formatting"
+    )
+
+    DEFAULT_BATCH_TRANSLATION_PROMPT = (
+        "Translate the following {batch_size} texts to {target_lang}:\n"
+        "{texts}\n"
+        "Rules:\n"
+        "1. Maintain the original meaning and style\n"
+        "2. Return translations as a numbered list, one per line\n"
+        "3. Keep any special characters or formatting\n"
+        "4. Return EXACTLY {batch_size} translations"
+    )
+
     @classmethod
     def get_setting(cls, key, default=None):
         """Get a setting value"""
@@ -95,6 +115,29 @@ class SettingsManager:
     def set_deepseek_model(cls, model):
         """Set DeepSeek model name"""
         cls.set_setting("deepseek_model", model)
+    
+    # Prompt Templates
+    @classmethod
+    def get_translation_prompt(cls):
+        """Get translation prompt template for single translations"""
+        default_prompt = cls.DEFAULT_SINGLE_TRANSLATION_PROMPT
+        return cls.get_setting("translation_prompt", default_prompt)
+    
+    @classmethod
+    def get_batch_translation_prompt(cls):
+        """Get translation prompt template for batch translations"""
+        default_prompt = cls.DEFAULT_BATCH_TRANSLATION_PROMPT
+        return cls.get_setting("batch_translation_prompt", default_prompt)
+    
+    @classmethod
+    def set_translation_prompt(cls, prompt):
+        """Set translation prompt template for single translations"""
+        cls.set_setting("translation_prompt", prompt)
+    
+    @classmethod
+    def set_batch_translation_prompt(cls, prompt):
+        """Set translation prompt template for batch translations"""
+        cls.set_setting("batch_translation_prompt", prompt)
     
     # Batch Settings
     @classmethod
